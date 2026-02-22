@@ -72,6 +72,7 @@ const createSession = async (sessionId, customWebhook = null) => {
         }
 
         // 3. Stream Messages to Webhook (Stateless)
+       // 3. Stream Messages to Webhook (Stateless)
         if (events['messages.upsert']) {
             const m = events['messages.upsert'];
             if (m.type === 'notify') {
@@ -79,12 +80,35 @@ const createSession = async (sessionId, customWebhook = null) => {
                     if (msg.key.fromMe) continue;
                     
                     const messageType = Object.keys(msg.message || {})[0];
+                    let mediaBase64 = null;
+                    let mimetype = null;
+
+                    // Decrypt and download media if the message contains a file/image
+                    const mediaTypes = ['imageMessage', 'documentMessage', 'videoMessage', 'audioMessage'];
+                    if (mediaTypes.includes(messageType)) {
+                        try {
+                            const buffer = await downloadMediaMessage(
+                                msg,
+                                'buffer',
+                                { },
+                                { logger: pino({ level: 'silent' }) }
+                            );
+                            mediaBase64 = buffer.toString('base64');
+                            mimetype = msg.message[messageType]?.mimetype;
+                        } catch (err) {
+                            console.error(`❌ Failed to decrypt media for ${msg.key.remoteJid}:`, err.message);
+                        }
+                    }
+
+                    // Send payload to Flask
                     await sendWebhook(sessionId, 'onmessage', {
                         from: msg.key.remoteJid,
                         pushName: msg.pushName,
                         type: messageType,
-                        messageId: msg.key.id, // Save this ID in Python if you want to use the /reply endpoint
-                        message: msg.message
+                        messageId: msg.key.id,
+                        message: msg.message,
+                        mediaBase64: mediaBase64, // Python will receive this!
+                        mimetype: mimetype
                     });
                 }
             }
