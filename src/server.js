@@ -26,8 +26,8 @@ const authGuard = async (req, res, next) => {
     next();
 };
 
-// 1. Generate Token: /api/v1/wabot/{session}/{wa_secret}/generate-token
-app.post('/:session/:secret/generate-token', async (req, res) => {
+// 1. Generate Token (Now matches your NGINX / Flask path)
+app.post('/api/:session/:secret/generate-token', async (req, res) => {
     const { session, secret } = req.params;
     
     // Check against global server secret
@@ -51,8 +51,8 @@ app.post('/:session/:secret/generate-token', async (req, res) => {
     });
 });
 
-// 2. Status Session: /api/v1/wabot/{session}/status-session
-app.get('/:session/status-session', authGuard, async (req, res) => {
+// 2. Status Session
+app.get('/api/:session/status-session', authGuard, async (req, res) => {
     const sessionDb = req.sessionDb;
     res.json({
         status: sessionDb.status,
@@ -61,11 +61,11 @@ app.get('/:session/status-session', authGuard, async (req, res) => {
     });
 });
 
-// 3. Start Session (Dynamic Webhook): /api/v1/wabot/{session}/start-session
-app.post('/:session/start-session', authGuard, async (req, res) => {
+// 3. Start Session (Dynamic Webhook)
+app.post('/api/:session/start-session', authGuard, async (req, res) => {
     const { session } = req.params;
     const { webhook, waitQrCode } = req.body;
-    console.log(session)
+    
     let sock = getSession(session);
     if (!sock) {
         sock = await createSession(session, webhook);
@@ -74,7 +74,7 @@ app.post('/:session/start-session', authGuard, async (req, res) => {
         await Session.findOneAndUpdate({ sessionId: session }, { webhook });
     }
 
-    // If Flask wants to wait for QR, give Baileys a second to generate it
+    // Give Baileys a second to generate the QR code
     setTimeout(async () => {
         const state = await Session.findOne({ sessionId: session });
         res.json({ 
@@ -86,32 +86,35 @@ app.post('/:session/start-session', authGuard, async (req, res) => {
     }, 2000);
 });
 
-// 4. Logout Session: /api/v1/wabot/{session}/logout-session
-app.post('/:session/logout-session', authGuard, async (req, res) => {
+// 4. Logout Session
+app.post('/api/:session/logout-session', authGuard, async (req, res) => {
     const { session } = req.params;
     await deleteSession(session);
     res.json({ status: 'success', message: 'Session logged out and disconnected.' });
 });
 
-// 5. Get Phone Number: /api/v1/wabot/{session}/get-phone-number
-app.get('/:session/get-phone-number', authGuard, async (req, res) => {
+// 5. Get Phone Number
+app.get('/api/:session/get-phone-number', authGuard, async (req, res) => {
     const sessionDb = req.sessionDb;
     res.json({
         status: 'success',
-        response: sessionDb.waNumber // Returns the bot's ID e.g., 254712345678@s.whatsapp.net
+        response: sessionDb.waNumber 
     });
 });
 
-// 6. Get LID Contact: /api/v1/wabot/{session}/contact/pn-lid/{from}
-app.get('/:session/contact/pn-lid/:from', authGuard, async (req, res) => {
-    // Note: Baileys handles LID mapping internally, but you can mock this response 
-    // or parse the ID from your database if needed.
+// 6. Get LID Contact
+app.get('/api/:session/contact/pn-lid/:from', authGuard, async (req, res) => {
     const { from } = req.params;
     res.json({
         phoneNumber: {
-            id: from.split('@')[0] // Fallback mapping for your Flask app
+            id: from.split('@')[0] 
         }
     });
+});
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.send('WhatsApp API is running!');
 });
 
 const PORT = process.env.PORT || 3000;
