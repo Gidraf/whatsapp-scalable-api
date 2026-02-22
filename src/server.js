@@ -65,7 +65,7 @@ app.get('/:session/status-session', authGuard, async (req, res) => {
 app.post('/:session/start-session', authGuard, async (req, res) => {
     const { session } = req.params;
     const { webhook, waitQrCode } = req.body;
-    
+    console.log(session)
     let sock = getSession(session);
     if (!sock) {
         sock = await createSession(session, webhook);
