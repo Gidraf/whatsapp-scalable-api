@@ -1,4 +1,4 @@
-const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
 const useMongoAuthState = require('../auth/mongoAuthState');
 const { Session, AuthState } = require('../models');
 const sendWebhook = require('./webhook');
