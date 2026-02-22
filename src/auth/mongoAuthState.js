@@ -7,7 +7,7 @@ const useMongoAuthState = async (sessionId) => {
         await AuthState.findOneAndUpdate(
             { sessionId, key },
             { sessionId, key, data: json },
-            { upsert: true, new: true }
+            { upsert: true, returnDocument: 'after' }
         );
     };
 

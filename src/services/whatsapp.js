@@ -26,9 +26,9 @@ const createSession = async (sessionId, customWebhook = null) => {
         await Session.findOneAndUpdate({ sessionId }, { webhook: customWebhook });
     }
 
-    const sock = makeWASocket({
+   const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true,
+        // REMOVE THIS LINE: printQRInTerminal: true, 
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
     });

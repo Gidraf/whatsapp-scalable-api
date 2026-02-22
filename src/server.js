@@ -40,7 +40,7 @@ app.post('/api/:session/:secret/generate-token', async (req, res) => {
     await Session.findOneAndUpdate(
         { sessionId: session },
         { sessionId: session, token: token },
-        { upsert: true, new: true }
+        { upsert: true, returnDocument: 'after' }
     );
 
     res.json({
