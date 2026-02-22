@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  
+
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    build: .
+    ports:
+      - "21465:3000"
+    environment:
+      - DATABASE_URL=postgresql://postgres:Winners1127@host.docker.internal:5432/wabot?schema=public
+      - PORT=21465
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -1,0 +1,46 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Session {
+  id        String    @id @default(uuid())
+  sessionId String    @unique
+  secret    String
+  webhook   String?
+  status    String    @default("DISCONNECTED")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+model AuthState {
+  id        String @id @default(uuid())
+  sessionId String
+  key       String
+  data      String // JSON representation including Buffers
+  @@unique([sessionId, key])
+}
+
+model Message {
+  id        String   @id @default(uuid())
+  messageId String
+  sessionId String
+  remoteJid String
+  fromMe    Boolean
+  text      String?
+  timestamp DateTime
+  session   Session  @relation(fields: [sessionId], references: [sessionId])
+
+  @@unique([sessionId, messageId])
+}
