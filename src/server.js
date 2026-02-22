@@ -24,13 +24,24 @@ mongoose.connect(process.env.MONGO_URL)
 // Auth Guard checks the Bearer token
 const authGuard = async (req, res, next) => {
     const { session } = req.params;
+    
+    if (req.path.includes('generate-token')) return next();
+
     const authHeader = req.headers.authorization;
     const token = authHeader ? authHeader.replace('Bearer ', '') : null;
 
     const sessionDb = await Session.findOne({ sessionId: session });
-    if (!sessionDb || sessionDb.token !== token) {
+    
+    // 👇 Add these debug logs
+    if (!sessionDb) {
+        console.log(`[AUTH FAILED] Session '${session}' not found in MongoDB.`);
         return res.status(401).json({ error: 'Unauthorized', status: 'error' });
     }
+    if (sessionDb.token !== token) {
+        console.log(`[AUTH FAILED] Token mismatch for session '${session}'.`);
+        return res.status(401).json({ error: 'Unauthorized', status: 'error' });
+    }
+    
     req.sessionDb = sessionDb;
     next();
 };
