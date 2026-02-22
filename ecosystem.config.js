@@ -3,7 +3,7 @@ module.exports = {
     {
       name: 'wa-api',
       script: 'src/server.js',
-      instances: 'max', // Scales to available CPU cores
+      instances: 1, // Scales to available CPU cores
       exec_mode: 'cluster',
       autorestart: true,
       watch: false,
