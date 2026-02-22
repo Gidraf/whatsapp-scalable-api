@@ -1,17 +1,13 @@
-version: '3.8'
 services:
-  
-
   api:
+    build: .
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    build: .
     ports:
+      # Maps host port 21465 to container port 3000
       - "21465:3000"
     environment:
       - DATABASE_URL=postgresql://postgres:Winners1127@host.docker.internal:5432/wabot?schema=public
-      - PORT=21465
+      # Tells the Express app inside the container to listen on port 3000
+      - PORT=3000 
     restart: unless-stopped
-
-volumes:
-  pgdata:
