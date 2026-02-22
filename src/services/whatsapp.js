@@ -37,12 +37,24 @@ const createSession = async (sessionId, customWebhook = null) => {
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', async (update) => {
+   sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
-            await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrRead' });
+            try {
+                // Convert raw QR string to Base64 image
+                const qrDataUrl = await QRCode.toDataURL(qr);
+                // React app expects just the base64 string, so strip the prefix
+                const base64Image = qrDataUrl.replace(/^data:image\/png;base64,/, "");
+                
+                // Save the base64 image to the database so Flask/React can fetch it
+                await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: base64Image });
+                
+                // Send the webhook event to Flask
+                await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrRead' });
+            } catch (err) {
+                console.error("Failed to generate Base64 QR code:", err);
+            }
         }
 
         if (connection === 'close') {
@@ -53,7 +65,6 @@ const createSession = async (sessionId, customWebhook = null) => {
                 await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
                 await AuthState.deleteMany({ sessionId });
                 sessions.delete(sessionId);
-                // Tells Flask to delete the integration
                 await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'logoutsession' });
             }
         } else if (connection === 'open') {
@@ -64,7 +75,6 @@ const createSession = async (sessionId, customWebhook = null) => {
                 qrCode: null,
                 waNumber: user.id
             });
-            // Triggers "qrReadSuccess" in your Flask app
             await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrReadSuccess' });
         }
     });
