@@ -1,11 +1,10 @@
-const { default: makeWASocket, DisconnectReason, Browsers, makeInMemoryStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
 const useMongoAuthState = require('../auth/mongoAuthState');
 const { Session, AuthState } = require('../models');
 const sendWebhook = require('./webhook');
 const pino = require('pino');
 
 const sessions = new Map();
-const stores = new Map();
 
 const createSession = async (sessionId, customWebhook = null) => {
     const { state, saveCreds } = await useMongoAuthState(sessionId);
@@ -14,27 +13,18 @@ const createSession = async (sessionId, customWebhook = null) => {
         await Session.findOneAndUpdate({ sessionId }, { webhook: customWebhook }, { upsert: true, returnDocument: 'after' });
     }
 
-    // Initialize or retrieve Store
-    let store = stores.get(sessionId);
-    if (!store) {
-        store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
-        stores.set(sessionId, store);
-    }
-
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
         generateHighQualityLinkPreview: true,
-        syncFullHistory: false // Prevents webhook spam from downloading old messages
+        syncFullHistory: false // Prevents massive data downloads on connect
     });
 
-    store.bind(sock.ev);
     sessions.set(sessionId, sock);
 
     sock.ev.process(async (events) => {
-        
-        // 1. Connection Updates
+        // 1. Connection Lifecycle
         if (events['connection.update']) {
             const { connection, lastDisconnect, qr } = events['connection.update'];
             
@@ -50,24 +40,23 @@ const createSession = async (sessionId, customWebhook = null) => {
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
                 
-                // 401 = User clicked "Log Out" on phone. 500 = Encryption keys are corrupt/invalid.
+                // 401: Logged out from phone | 500: Session keys are corrupted
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession;
 
                 if (isLoggedOut) {
-                    console.log(`❌ [${sessionId}] Session logged out or corrupted. Wiping data for fresh QR...`);
+                    console.log(`❌ [${sessionId}] Session explicitly logged out or corrupted.`);
+                    
+                    // Update Database
                     await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
                     await AuthState.deleteMany({ sessionId });
                     sessions.delete(sessionId);
-                    stores.delete(sessionId);
                     
-                    // Tell Flask to drop the connection so the UI asks for a new QR
+                    // Notify Flask to update its DB and alert the frontend
                     await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
                 } else {
-                    console.log(`🔄 [${sessionId}] Connection lost (Code: ${statusCode}). Reconnecting in 3s...`);
-                    // IMPORTANT: We do NOT delete session data here. We just restart the socket.
-                    setTimeout(() => {
-                        createSession(sessionId);
-                    }, 3000);
+                    // It's just a network drop or Baileys internal restart. DO NOT wipe data.
+                    console.log(`🔄 [${sessionId}] Network drop (Code: ${statusCode}). Reconnecting silently...`);
+                    setTimeout(() => createSession(sessionId), 3000);
                 }
             } else if (connection === 'open') {
                 console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
@@ -76,27 +65,42 @@ const createSession = async (sessionId, customWebhook = null) => {
             }
         }
 
-        // 2. Save Credentials
-        if (events['creds.update']) {
-            await saveCreds();
-        }
+        if (events['creds.update']) await saveCreds();
 
-        // 3. Forward Incoming Messages to Webhook
+        // 2. Pass Messages to Webhook
         if (events['messages.upsert']) {
             const m = events['messages.upsert'];
             if (m.type === 'notify') {
                 for (const msg of m.messages) {
                     if (msg.key.fromMe) continue;
-                    
                     const messageType = Object.keys(msg.message || {})[0];
                     await sendWebhook(sessionId, 'onmessage', {
                         from: msg.key.remoteJid,
                         pushName: msg.pushName,
                         type: messageType,
-                        message: msg.message
+                        message: msg.message,
+                        raw: msg // Important for the Forwarding API
                     });
                 }
             }
+        }
+        // 2. Stream Contacts directly to Flask
+        if (events['contacts.upsert']) {
+            const contacts = events['contacts.upsert'].map(c => ({
+                id: c.id,
+                name: c.name || c.notify || 'Unknown'
+            }));
+            await sendWebhook(sessionId, 'contacts-sync', { contacts });
+        }
+
+        // 3. Stream Chats directly to Flask
+        if (events['chats.upsert']) {
+            const chats = events['chats.upsert'].map(c => ({
+                id: c.id,
+                name: c.name || 'Unknown',
+                unreadCount: c.unreadCount || 0
+            }));
+            await sendWebhook(sessionId, 'chats-sync', { chats });
         }
     });
 
@@ -104,17 +108,21 @@ const createSession = async (sessionId, customWebhook = null) => {
 };
 
 const getSession = (sessionId) => sessions.get(sessionId);
-const getStore = (sessionId) => stores.get(sessionId);
 
+// The API Logout endpoint triggers this
 const deleteSession = async (sessionId) => {
     const sock = sessions.get(sessionId);
     if (sock) {
         try { await sock.logout(); } catch (e) {}
         sessions.delete(sessionId);
-        stores.delete(sessionId);
     }
+    
+    // Wipe DB
     await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
     await AuthState.deleteMany({ sessionId });
+    
+    // Notify Flask
+    await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
 };
 
-module.exports = { createSession, getSession, getStore, deleteSession };
+module.exports = { createSession, getSession, deleteSession };
