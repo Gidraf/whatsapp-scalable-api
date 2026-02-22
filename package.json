@@ -11,19 +11,18 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@prisma/client": "^7.4.1",
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "axios": "^1.13.5",
     "cors": "^2.8.6",
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
+    "mongoose": "^9.2.1",
     "pino": "^10.3.1",
     "pm2": "^6.0.14",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",
-    "prisma": "^7.4.1",
     "typescript": "^5.9.3"
   }
 }

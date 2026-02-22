@@ -1,17 +1,14 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
 generator client {
   provider      = "prisma-client-js"
-  output        = "../src/generated/prisma"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x", "linux-musl"]
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mongodb"
 }
 
 model Session {
-  id        String    @id @default(uuid())
+  id        String    @id @default(auto()) @map("_id") @db.ObjectId
   sessionId String    @unique
   secret    String
   webhook   String?
@@ -22,15 +19,16 @@ model Session {
 }
 
 model AuthState {
-  id        String @id @default(uuid())
+  id        String @id @default(auto()) @map("_id") @db.ObjectId
   sessionId String
   key       String
   data      String // JSON representation including Buffers
+
   @@unique([sessionId, key])
 }
 
 model Message {
-  id        String   @id @default(uuid())
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
   messageId String
   sessionId String
   remoteJid String

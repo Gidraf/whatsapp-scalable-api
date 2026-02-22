@@ -1,20 +1,23 @@
 const express = require('express');
-const { PrismaClient } = require('@prisma/client');
+const mongoose = require('mongoose');
 const { createSession, getSession } = require('./services/whatsapp');
-const qrcode = require('qrcode');
+const { Session } = require('./models');
 
 const app = express();
-const prisma = new PrismaClient();
-
 app.use(express.json());
 
-// Middleware to check Session Secret
+// Connect to MongoDB
+mongoose.connect(process.env.MONGO_URL)
+    .then(() => console.log('✅ Connected to MongoDB'))
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// Auth Guard Middleware
 const authGuard = async (req, res, next) => {
     const { session } = req.params;
     const authHeader = req.headers.authorization;
     const token = authHeader ? authHeader.replace('Bearer ', '') : null;
 
-    const sessionDb = await prisma.session.findUnique({ where: { sessionId: session } });
+    const sessionDb = await Session.findOne({ sessionId: session });
     if (!sessionDb) return res.status(404).json({ error: 'Session not found. Create it first.' });
     if (sessionDb.secret !== token) return res.status(401).json({ error: 'Unauthorized. Invalid secret.' });
 
@@ -22,21 +25,19 @@ const authGuard = async (req, res, next) => {
     next();
 };
 
-// 1. Create a new Session configuration (Equivalent to generating token)
 app.post('/api/:session/config', async (req, res) => {
     const { session } = req.params;
     const { secret, webhook } = req.body;
     
-    await prisma.session.upsert({
-        where: { sessionId: session },
-        update: { secret, webhook },
-        create: { sessionId: session, secret, webhook }
-    });
+    await Session.findOneAndUpdate(
+        { sessionId: session },
+        { sessionId: session, secret, webhook },
+        { upsert: true, new: true }
+    );
     
     res.json({ status: 'success', message: 'Session configured successfully.' });
 });
 
-// 2. Start Session & Get QR (WPPConnect pattern)
 app.post('/api/:session/start', authGuard, async (req, res) => {
     const { session } = req.params;
     
@@ -45,14 +46,12 @@ app.post('/api/:session/start', authGuard, async (req, res) => {
         sock = await createSession(session);
     }
 
-    // Wait briefly to see if QR is generated or already connected
     setTimeout(async () => {
-        const state = await prisma.session.findUnique({ where: { sessionId: session } });
-        res.json({ status: 'success', state: state.status, message: 'Process started. Listen to webhooks for QR or Connection state.' });
+        const state = await Session.findOne({ sessionId: session });
+        res.json({ status: 'success', state: state.status, message: 'Process started. Listen to webhooks.' });
     }, 2000);
 });
 
-// 3. Send Text Message
 app.post('/api/:session/send-message', authGuard, async (req, res) => {
     const { session } = req.params;
     const { phone, message } = req.body;
@@ -69,15 +68,5 @@ app.post('/api/:session/send-message', authGuard, async (req, res) => {
     }
 });
 
-// 4. Get Contacts
-app.get('/api/:session/contacts', authGuard, async (req, res) => {
-    const { session } = req.params;
-    const sock = getSession(session);
-    if (!sock) return res.status(400).json({ error: 'Session is not active' });
-
-    // Baileys requires you to sync contacts from the store or phone
-    res.json({ status: 'success', message: 'Contacts fetch endpoint (Add @whiskeysockets/baileys store logic here)' });
-});
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`API running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));

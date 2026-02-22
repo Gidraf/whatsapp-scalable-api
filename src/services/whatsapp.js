@@ -1,16 +1,14 @@
 const { default: makeWASocket, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
-const usePrismaAuthState = require('../auth/prismaAuthState');
-const { PrismaClient } = require('@prisma/client');
+const useMongoAuthState = require('../auth/mongoAuthState');
+const { Session, AuthState, Message } = require('../models');
 const axios = require('axios');
 const pino = require('pino');
 
-const prisma = new PrismaClient();
 const sessions = new Map();
 
-// Helper to send webhooks
 const sendWebhook = async (sessionId, event, data) => {
     try {
-        const session = await prisma.session.findUnique({ where: { sessionId } });
+        const session = await Session.findOne({ sessionId });
         if (session && session.webhook) {
             await axios.post(session.webhook, { sessionId, event, data });
         }
@@ -20,7 +18,7 @@ const sendWebhook = async (sessionId, event, data) => {
 };
 
 const createSession = async (sessionId) => {
-    const { state, saveCreds } = await usePrismaAuthState(sessionId);
+    const { state, saveCreds } = await useMongoAuthState(sessionId);
     
     const sock = makeWASocket({
         auth: state,
@@ -45,13 +43,13 @@ const createSession = async (sessionId) => {
             if (shouldReconnect) {
                 createSession(sessionId);
             } else {
-                await prisma.session.update({ where: { sessionId }, data: { status: 'LOGGED_OUT' }});
-                await prisma.authState.deleteMany({ where: { sessionId } });
+                await Session.findOneAndUpdate({ sessionId }, { status: 'LOGGED_OUT' });
+                await AuthState.deleteMany({ sessionId });
                 sessions.delete(sessionId);
                 await sendWebhook(sessionId, 'connection', { status: 'LOGGED_OUT' });
             }
         } else if (connection === 'open') {
-            await prisma.session.update({ where: { sessionId }, data: { status: 'CONNECTED' }});
+            await Session.findOneAndUpdate({ sessionId }, { status: 'CONNECTED' });
             await sendWebhook(sessionId, 'connection', { status: 'CONNECTED' });
         }
     });
@@ -59,19 +57,15 @@ const createSession = async (sessionId) => {
     sock.ev.on('messages.upsert', async (m) => {
         if (m.type === 'notify') {
             for (const msg of m.messages) {
-                // Store in PostgreSQL
-                await prisma.message.create({
-                    data: {
-                        messageId: msg.key.id,
-                        sessionId: sessionId,
-                        remoteJid: msg.key.remoteJid,
-                        fromMe: msg.key.fromMe,
-                        text: msg.message?.conversation || msg.message?.extendedTextMessage?.text || '',
-                        timestamp: new Date(msg.messageTimestamp * 1000)
-                    }
+                await Message.create({
+                    messageId: msg.key.id,
+                    sessionId: sessionId,
+                    remoteJid: msg.key.remoteJid,
+                    fromMe: msg.key.fromMe,
+                    text: msg.message?.conversation || msg.message?.extendedTextMessage?.text || '',
+                    timestamp: new Date(msg.messageTimestamp * 1000)
                 });
                 
-                // Dispatch Webhook
                 await sendWebhook(sessionId, 'message', msg);
             }
         }
