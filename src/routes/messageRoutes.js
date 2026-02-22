@@ -15,23 +15,18 @@ router.use(requireSock);
 
 // Send Text, Image, Video, Audio, Docs
 router.post('/send', async (req, res) => {
-    const { phone, type, text, url, caption, mimetype, filename, pollName, pollOptions, lat, lng, eventDetails } = req.body;
+    // 👇 Added base64 to the destructured body
+    const { phone, type, text, url, base64, caption, mimetype, filename } = req.body;
     let payload = {};
 
+    // 👇 Dynamically check if we are using a URL or a Base64 string
+    const mediaContent = url ? { url } : (base64 ? Buffer.from(base64, 'base64') : null);
+
     if (type === 'text') payload = { text };
-    else if (type === 'image') payload = { image: { url }, caption };
-    else if (type === 'document') payload = { document: { url }, mimetype, fileName: filename };
-    
-    // 👇 Add the new types here
-    else if (type === 'poll') {
-        payload = { poll: { name: pollName, values: pollOptions, selectableCount: 1 } };
-    } 
-    else if (type === 'location') {
-        payload = { location: { degreesLatitude: lat, degreesLongitude: lng } };
-    } 
-    else if (type === 'event') {
-        payload = { eventMessage: eventDetails };
-    }
+    else if (type === 'image') payload = { image: mediaContent, caption };
+    else if (type === 'video') payload = { video: mediaContent, caption };
+    else if (type === 'audio') payload = { audio: mediaContent, mimetype: mimetype || 'audio/mp4', ptt: true };
+    else if (type === 'document') payload = { document: mediaContent, mimetype, fileName: filename, caption };
 
     try {
         const result = await req.sock.sendMessage(formatJid(phone), payload);
