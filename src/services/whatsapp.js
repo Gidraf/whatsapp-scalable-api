@@ -10,7 +10,11 @@ const createSession = async (sessionId, customWebhook = null) => {
     const { state, saveCreds } = await useMongoAuthState(sessionId);
     
     if (customWebhook) {
-        await Session.findOneAndUpdate({ sessionId }, { webhook: customWebhook }, { upsert: true, returnDocument: 'after' });
+        await Session.findOneAndUpdate(
+            { sessionId }, 
+            { webhook: customWebhook }, 
+            { upsert: true, returnDocument: 'after' }
+        );
     }
 
     const sock = makeWASocket({
@@ -28,12 +32,11 @@ const createSession = async (sessionId, customWebhook = null) => {
         if (events['connection.update']) {
             const { connection, lastDisconnect, qr } = events['connection.update'];
             
-           try {
-                    // 🛑 DELETED the QRCode.toDataURL base64 conversion!
-                    // ✅ Now we pass the raw, short text string directly.
-                    await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
-                    await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
-                } catch (e) { console.error("QR Error:", e.message); }
+            // Pass the raw QR string directly to Flask (No Base64 image generation)
+            if (qr) {
+                await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
+                await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
+            }
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
@@ -63,26 +66,31 @@ const createSession = async (sessionId, customWebhook = null) => {
             }
         }
 
-        if (events['creds.update']) await saveCreds();
+        // 2. Save Credentials to MongoDB
+        if (events['creds.update']) {
+            await saveCreds();
+        }
 
-        // 2. Pass Messages to Webhook
+        // 3. Stream Messages to Webhook (Stateless)
         if (events['messages.upsert']) {
             const m = events['messages.upsert'];
             if (m.type === 'notify') {
                 for (const msg of m.messages) {
                     if (msg.key.fromMe) continue;
+                    
                     const messageType = Object.keys(msg.message || {})[0];
                     await sendWebhook(sessionId, 'onmessage', {
                         from: msg.key.remoteJid,
                         pushName: msg.pushName,
                         type: messageType,
-                        message: msg.message,
-                        raw: msg // Important for the Forwarding API
+                        messageId: msg.key.id, // Save this ID in Python if you want to use the /reply endpoint
+                        message: msg.message
                     });
                 }
             }
         }
-        // 2. Stream Contacts directly to Flask
+
+        // 4. Stream Contacts to Webhook
         if (events['contacts.upsert']) {
             const contacts = events['contacts.upsert'].map(c => ({
                 id: c.id,
@@ -91,7 +99,7 @@ const createSession = async (sessionId, customWebhook = null) => {
             await sendWebhook(sessionId, 'contacts-sync', { contacts });
         }
 
-        // 3. Stream Chats directly to Flask
+        // 5. Stream Chats to Webhook
         if (events['chats.upsert']) {
             const chats = events['chats.upsert'].map(c => ({
                 id: c.id,
@@ -107,7 +115,6 @@ const createSession = async (sessionId, customWebhook = null) => {
 
 const getSession = (sessionId) => sessions.get(sessionId);
 
-// The API Logout endpoint triggers this
 const deleteSession = async (sessionId) => {
     const sock = sessions.get(sessionId);
     if (sock) {
@@ -123,4 +130,20 @@ const deleteSession = async (sessionId) => {
     await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
 };
 
-module.exports = { createSession, getSession, deleteSession };
+// Auto-Restore Function
+const restoreSessions = async () => {
+    try {
+        const activeSessions = await Session.find({ status: 'CONNECTED' });
+        console.log(`🔄 Found ${activeSessions.length} active sessions in DB. Booting them up...`);
+        
+        for (const sessionDb of activeSessions) {
+            console.log(`🔌 Restoring session: [${sessionDb.sessionId}]`);
+            await createSession(sessionDb.sessionId, sessionDb.webhook);
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Prevent rate-limiting
+        }
+    } catch (error) {
+        console.error("❌ Failed to restore sessions:", error.message);
+    }
+};
+
+module.exports = { createSession, getSession, deleteSession, restoreSessions };

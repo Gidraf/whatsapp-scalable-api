@@ -1,30 +1,31 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const crypto = require('crypto');
-const { createSession, getSession, deleteSession } = require('./services/whatsapp');
 const { Session } = require('./models');
+
+// Import Controllers and Functions
+const { restoreSessions } = require('./services/whatsapp');
+const sessionRoutes = require('./routes/sessionRoutes');
+const messageRoutes = require('./routes/messageRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const infoRoutes = require('./routes/infoRoutes'); // Make sure you have this file from our previous steps
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-const infoRoutes = require('./routes/infoRoutes');
-const messageRoutes = require('./routes/messageRoutes');
-const businessRoutes = require('./routes/businessRoutes');
-const sessionRoutes = require('./routes/sessionRoutes');
 
-app.use('/api/v1/wabot/:session', sessionRoutes);
-app.use('/api/v1/wabot/:session', messageRoutes);
-app.use('/api/v1/wabot/:session', businessRoutes);
-app.use('/api/v1/wabot/:session', infoRoutes);
-
+// Connect to MongoDB and Auto-Restore Sessions
 mongoose.connect(process.env.MONGO_URL)
-    .then(() => console.log('✅ Connected to MongoDB'))
+    .then(async () => {
+        console.log('✅ Connected to MongoDB');
+        await restoreSessions();
+    })
     .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
-// Auth Guard checks the Bearer token
+// Global Auth Guard Middleware
 const authGuard = async (req, res, next) => {
     const { session } = req.params;
     
+    // Skip auth requirement for generating a new token
     if (req.path.includes('generate-token')) return next();
 
     const authHeader = req.headers.authorization;
@@ -32,110 +33,28 @@ const authGuard = async (req, res, next) => {
 
     const sessionDb = await Session.findOne({ sessionId: session });
     
-    // 👇 Add these debug logs
     if (!sessionDb) {
-        console.log(`[AUTH FAILED] Session '${session}' not found in MongoDB.`);
-        return res.status(401).json({ error: 'Unauthorized', status: 'error' });
+        return res.status(401).json({ error: 'Unauthorized. Session not found.', status: 'error' });
     }
     if (sessionDb.token !== token) {
-        console.log(`[AUTH FAILED] Token mismatch for session '${session}'.`);
-        return res.status(401).json({ error: 'Unauthorized', status: 'error' });
+        return res.status(401).json({ error: 'Unauthorized. Token mismatch.', status: 'error' });
     }
     
     req.sessionDb = sessionDb;
     next();
 };
 
-// 1. Generate Token (Now matches your NGINX / Flask path)
-app.post('/api/:session/:secret/generate-token', async (req, res) => {
-    const { session, secret } = req.params;
-    
-    // Check against global server secret
-    if (secret !== process.env.WA_SECRET) {
-        return res.status(401).json({ status: 'error', message: 'Invalid WA_SECRET' });
-    }
+// Apply Middleware
+app.use('/api/v1/wabot/:session', authGuard);
 
-    const token = crypto.randomBytes(32).toString('hex');
-    
-    await Session.findOneAndUpdate(
-        { sessionId: session },
-        { sessionId: session, token: token },
-        { upsert: true, returnDocument: 'after' }
-    );
+// Register Modular Routes
+app.use('/api/v1/wabot/:session', sessionRoutes);
+app.use('/api/v1/wabot/:session', messageRoutes);
+app.use('/api/v1/wabot/:session', businessRoutes);
+app.use('/api/v1/wabot/:session', infoRoutes);
 
-    res.json({
-        status: 'success',
-        token: token,
-        full: `${session}-wabot`, // Matches your Flask expectations
-        message: 'Token generated'
-    });
-});
-
-// 2. Status Session
-app.get('/api/:session/status-session', authGuard, async (req, res) => {
-    const sessionDb = req.sessionDb;
-    res.json({
-        status: sessionDb.status,
-        qrcode: sessionDb.qrCode || null,
-        message: 'Session status retrieved'
-    });
-});
-
-// 3. Start Session (Dynamic Webhook)
-app.post('/api/:session/start-session', authGuard, async (req, res) => {
-    const { session } = req.params;
-    const { webhook, waitQrCode } = req.body;
-    
-    let sock = getSession(session);
-    if (!sock) {
-        sock = await createSession(session, webhook);
-    } else if (webhook) {
-        // Update webhook dynamically if session already exists
-        await Session.findOneAndUpdate({ sessionId: session }, { webhook });
-    }
-
-    // Give Baileys a second to generate the QR code
-    setTimeout(async () => {
-        const state = await Session.findOne({ sessionId: session });
-        res.json({ 
-            status: 'success', 
-            state: state.status, 
-            qrcode: state.qrCode,
-            message: 'Session process started.' 
-        });
-    }, 2000);
-});
-
-// 4. Logout Session
-app.post('/api/:session/logout-session', authGuard, async (req, res) => {
-    const { session } = req.params;
-    await deleteSession(session);
-    res.json({ status: 'success', message: 'Session logged out and disconnected.' });
-});
-
-// 5. Get Phone Number
-app.get('/api/:session/get-phone-number', authGuard, async (req, res) => {
-    const sessionDb = req.sessionDb;
-    res.json({
-        status: 'success',
-        response: sessionDb.waNumber 
-    });
-});
-
-// 6. Get LID Contact
-app.get('/api/:session/contact/pn-lid/:from', authGuard, async (req, res) => {
-    const { from } = req.params;
-    res.json({
-        phoneNumber: {
-            id: from.split('@')[0] 
-        }
-    });
-});
-
-// Health check endpoint
-app.get('/', (req, res) => {
-    res.send('WhatsApp API is running!');
-});
+// Health Check
+app.get('/', (req, res) => res.send('🚀 WhatsApp Modular API Running'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 API running on port ${PORT}`));
