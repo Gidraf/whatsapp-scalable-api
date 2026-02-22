@@ -1,4 +1,5 @@
-FROM node:18-alpine
+# Use Node 20 instead of 18
+FROM node:20-alpine
 
 # Install OS dependencies required by Baileys/Canvas/FFMPEG
 RUN apk add --no-cache ffmpeg git
