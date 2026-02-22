@@ -6,6 +6,6 @@ services:
     ports:
       - "21465:3000"
     environment:
-      - DATABASE_URL=mongodb://host.docker.internal:27017/wabot?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.5.10
+      - MONGO_URL=mongodb://host.docker.internal:27017/wabot?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.5.10
       - PORT=3000
     restart: unless-stopped
