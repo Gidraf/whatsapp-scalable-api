@@ -8,4 +8,5 @@ services:
     environment:
       - MONGO_URL=mongodb://host.docker.internal:27017/wabot?directConnection=true&serverSelectionTimeoutMS=2000&appName=mongosh+2.5.10
       - PORT=3000
+      - WA_SECRET=14e866f74a6f260bfd89b76bca9f2bbb2a0a88a4 # Matches os.environ.get("WA_SECRET") in Flask
     restart: unless-stopped

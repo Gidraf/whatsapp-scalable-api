@@ -2,9 +2,11 @@ const mongoose = require('mongoose');
 
 const sessionSchema = new mongoose.Schema({
     sessionId: { type: String, required: true, unique: true },
-    secret: { type: String, required: true },
+    token: { type: String, required: true }, // The Bearer token
     webhook: { type: String },
-    status: { type: String, default: 'DISCONNECTED' }
+    status: { type: String, default: 'DISCONNECTED' },
+    waNumber: { type: String }, // Stores the bot's phone number
+    qrCode: { type: String } // Temporarily store QR so /status-session can fetch it
 }, { timestamps: true });
 
 const authStateSchema = new mongoose.Schema({
@@ -12,7 +14,6 @@ const authStateSchema = new mongoose.Schema({
     key: { type: String, required: true },
     data: { type: String, required: true }
 });
-// Compound index to ensure keys are unique per session
 authStateSchema.index({ sessionId: 1, key: 1 }, { unique: true });
 
 const messageSchema = new mongoose.Schema({
