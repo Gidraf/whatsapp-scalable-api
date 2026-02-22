@@ -37,24 +37,13 @@ const createSession = async (sessionId, customWebhook = null) => {
 
     sock.ev.on('creds.update', saveCreds);
 
-   sock.ev.on('connection.update', async (update) => {
+  sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // 1. Send the RAW string. No try/catch, no QRCode package!
         if (qr) {
-            try {
-                // Convert raw QR string to Base64 image
-                const qrDataUrl = await QRCode.toDataURL(qr);
-                // React app expects just the base64 string, so strip the prefix
-                const base64Image = qrDataUrl.replace(/^data:image\/png;base64,/, "");
-                
-                // Save the base64 image to the database so Flask/React can fetch it
-                await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: base64Image });
-                
-                // Send the webhook event to Flask
-                await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrRead' });
-            } catch (err) {
-                console.error("Failed to generate Base64 QR code:", err);
-            }
+            await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
+            await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrRead' });
         }
 
         if (connection === 'close') {
