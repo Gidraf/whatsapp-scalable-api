@@ -28,14 +28,12 @@ const createSession = async (sessionId, customWebhook = null) => {
         if (events['connection.update']) {
             const { connection, lastDisconnect, qr } = events['connection.update'];
             
-            if (qr) {
-                try {
-                    const QRCode = require('qrcode');
-                    const qrBase64 = (await QRCode.toDataURL(qr)).replace(/^data:image\/png;base64,/, "");
-                    await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qrBase64 });
-                    await sendWebhook(sessionId, 'qrcode', { qrcode: qrBase64 });
+           try {
+                    // 🛑 DELETED the QRCode.toDataURL base64 conversion!
+                    // ✅ Now we pass the raw, short text string directly.
+                    await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
+                    await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
                 } catch (e) { console.error("QR Error:", e.message); }
-            }
 
             if (connection === 'close') {
                 const statusCode = lastDisconnect?.error?.output?.statusCode;
