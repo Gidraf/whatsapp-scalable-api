@@ -1,120 +1,101 @@
-const { default: makeWASocket, DisconnectReason, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, DisconnectReason, Browsers, makeInMemoryStore } = require('@whiskeysockets/baileys');
 const useMongoAuthState = require('../auth/mongoAuthState');
-const { Session, AuthState, Message } = require('../models');
-const axios = require('axios');
+const { Session, AuthState } = require('../models');
+const sendWebhook = require('./webhook');
 const pino = require('pino');
 
 const sessions = new Map();
-
-// Formats and sends webhooks exactly how your Flask app expects them
-const sendWebhook = async (sessionId, payload) => {
-    try {
-        const session = await Session.findOne({ sessionId });
-        if (session && session.webhook) {
-            await axios.post(session.webhook, payload);
-        }
-    } catch (err) {
-        console.error(`Webhook error for session ${sessionId}:`, err.message);
-    }
-};
+const stores = new Map();
 
 const createSession = async (sessionId, customWebhook = null) => {
     const { state, saveCreds } = await useMongoAuthState(sessionId);
     
-    // Update webhook if provided dynamically during start-session
     if (customWebhook) {
-        await Session.findOneAndUpdate({ sessionId }, { webhook: customWebhook });
+        await Session.findOneAndUpdate({ sessionId }, { webhook: customWebhook }, { upsert: true, returnDocument: 'after' });
     }
 
-   const sock = makeWASocket({
+    // Initialize or retrieve Store
+    let store = stores.get(sessionId);
+    if (!store) {
+        store = makeInMemoryStore({ logger: pino({ level: 'silent' }) });
+        stores.set(sessionId, store);
+    }
+
+    const sock = makeWASocket({
         auth: state,
-        // REMOVE THIS LINE: printQRInTerminal: true, 
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: false // Prevents webhook spam from downloading old messages
     });
 
+    store.bind(sock.ev);
     sessions.set(sessionId, sock);
 
-    sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
-
-        // 1. Send the RAW string. No try/catch, no QRCode package!
-        if (qr) {
-            await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
-            await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrRead' });
-        }
-
-        if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect.error)?.output?.statusCode !== DisconnectReason.loggedOut;
-            if (shouldReconnect) {
-                createSession(sessionId);
-            } else {
-                await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
-                await AuthState.deleteMany({ sessionId });
-                sessions.delete(sessionId);
-                await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'logoutsession' });
+    sock.ev.process(async (events) => {
+        
+        // 1. Connection Updates
+        if (events['connection.update']) {
+            const { connection, lastDisconnect, qr } = events['connection.update'];
+            
+            if (qr) {
+                try {
+                    const QRCode = require('qrcode');
+                    const qrBase64 = (await QRCode.toDataURL(qr)).replace(/^data:image\/png;base64,/, "");
+                    await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qrBase64 });
+                    await sendWebhook(sessionId, 'qrcode', { qrcode: qrBase64 });
+                } catch (e) { console.error("QR Error:", e.message); }
             }
-        } else if (connection === 'open') {
-            const user = sock.user;
-            await Session.findOneAndUpdate({ 
-                sessionId, 
-                status: 'CONNECTED', 
-                qrCode: null,
-                waNumber: user.id
-            });
-            await sendWebhook(sessionId, { event: 'status-find', session: sessionId, status: 'qrReadSuccess' });
-        }
-    });
 
-    sock.ev.on('messages.upsert', async (m) => {
-        if (m.type === 'notify') {
-            for (const msg of m.messages) {
-                if (msg.key.fromMe) continue;
+            if (connection === 'close') {
+                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                
+                // 401 = User clicked "Log Out" on phone. 500 = Encryption keys are corrupt/invalid.
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession;
 
-                const messageType = Object.keys(msg.message || {})[0];
-                let type = 'chat';
-                let body = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-                let mimetype = null;
-                let caption = msg.message?.imageMessage?.caption || msg.message?.documentMessage?.caption || '';
-                let lat = null, lng = null;
-
-                // Handle Media (Document / Image)
-                if (messageType === 'imageMessage' || messageType === 'documentMessage') {
-                    type = messageType === 'imageMessage' ? 'image' : 'document';
-                    mimetype = msg.message[messageType].mimetype;
-                    try {
-                        const buffer = await downloadMediaMessage(msg, 'buffer', { }, { logger: pino({ level: 'silent' }) });
-                        body = buffer.toString('base64'); // Flask will extract text from this base64 string
-                    } catch (e) {
-                        console.error('Failed to download media', e);
-                    }
-                } 
-                // Handle Location
-                else if (messageType === 'locationMessage') {
-                    type = 'location';
-                    lat = msg.message.locationMessage.degreesLatitude;
-                    lng = msg.message.locationMessage.degreesLongitude;
+                if (isLoggedOut) {
+                    console.log(`❌ [${sessionId}] Session logged out or corrupted. Wiping data for fresh QR...`);
+                    await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
+                    await AuthState.deleteMany({ sessionId });
+                    sessions.delete(sessionId);
+                    stores.delete(sessionId);
+                    
+                    // Tell Flask to drop the connection so the UI asks for a new QR
+                    await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
+                } else {
+                    console.log(`🔄 [${sessionId}] Connection lost (Code: ${statusCode}). Reconnecting in 3s...`);
+                    // IMPORTANT: We do NOT delete session data here. We just restart the socket.
+                    setTimeout(() => {
+                        createSession(sessionId);
+                    }, 3000);
                 }
+            } else if (connection === 'open') {
+                console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
+                await Session.findOneAndUpdate({ sessionId, status: 'CONNECTED', qrCode: null, waNumber: sock.user.id });
+                await sendWebhook(sessionId, 'status-find', { status: 'qrReadSuccess' });
+            }
+        }
 
-                const payload = {
-                    event: 'onmessage',
-                    session: sessionId,
-                    from: msg.key.remoteJid,
-                    type: type,
-                    body: body,
-                    caption: caption,
-                    mimetype: mimetype,
-                    lat: lat,
-                    lng: lng,
-                    sender: {
-                        name: msg.pushName || 'User',
-                        pushname: msg.pushName || 'User'
-                    }
-                };
+        // 2. Save Credentials
+        if (events['creds.update']) {
+            await saveCreds();
+        }
 
-                await sendWebhook(sessionId, payload);
+        // 3. Forward Incoming Messages to Webhook
+        if (events['messages.upsert']) {
+            const m = events['messages.upsert'];
+            if (m.type === 'notify') {
+                for (const msg of m.messages) {
+                    if (msg.key.fromMe) continue;
+                    
+                    const messageType = Object.keys(msg.message || {})[0];
+                    await sendWebhook(sessionId, 'onmessage', {
+                        from: msg.key.remoteJid,
+                        pushName: msg.pushName,
+                        type: messageType,
+                        message: msg.message
+                    });
+                }
             }
         }
     });
@@ -123,15 +104,17 @@ const createSession = async (sessionId, customWebhook = null) => {
 };
 
 const getSession = (sessionId) => sessions.get(sessionId);
+const getStore = (sessionId) => stores.get(sessionId);
 
 const deleteSession = async (sessionId) => {
     const sock = sessions.get(sessionId);
     if (sock) {
-        await sock.logout();
+        try { await sock.logout(); } catch (e) {}
         sessions.delete(sessionId);
+        stores.delete(sessionId);
     }
     await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
     await AuthState.deleteMany({ sessionId });
 };
 
-module.exports = { createSession, getSession, deleteSession };
+module.exports = { createSession, getSession, getStore, deleteSession };

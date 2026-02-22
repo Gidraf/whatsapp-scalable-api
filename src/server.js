@@ -7,6 +7,15 @@ const { Session } = require('./models');
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+const infoRoutes = require('./routes/infoRoutes');
+const messageRoutes = require('./routes/messageRoutes');
+const businessRoutes = require('./routes/businessRoutes');
+const sessionRoutes = require('./routes/sessionRoutes');
+
+app.use('/api/v1/wabot/:session', sessionRoutes);
+app.use('/api/v1/wabot/:session', messageRoutes);
+app.use('/api/v1/wabot/:session', businessRoutes);
+app.use('/api/v1/wabot/:session', infoRoutes);
 
 mongoose.connect(process.env.MONGO_URL)
     .then(() => console.log('✅ Connected to MongoDB'))
