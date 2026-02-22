@@ -45,13 +45,13 @@ const authGuard = async (req, res, next) => {
 };
 
 // Apply Middleware
-app.use('/api/v1/wabot/:session', authGuard);
+app.use('/api/:session', authGuard);
 
 // Register Modular Routes
-app.use('/api/v1/wabot/:session', sessionRoutes);
-app.use('/api/v1/wabot/:session', messageRoutes);
-app.use('/api/v1/wabot/:session', businessRoutes);
-app.use('/api/v1/wabot/:session', infoRoutes);
+app.use('/api/:session', sessionRoutes);
+app.use('/api/:session', messageRoutes);
+app.use('/api/:session', businessRoutes);
+app.use('/api/:session', infoRoutes);
 
 // Health Check
 app.get('/', (req, res) => res.send('🚀 WhatsApp Modular API Running'));
