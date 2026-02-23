@@ -18,6 +18,14 @@ const createSession = async (sessionId, customWebhook = null) => {
         );
     }
 
+    if (customWebhook) {
+    await Session.findOneAndUpdate(
+        { sessionId }, 
+        { $set: { webhook: customWebhook } }, // 👈 ADDED $set
+        { upsert: true, returnDocument: 'after' }
+    );
+}
+
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
@@ -30,51 +38,53 @@ const createSession = async (sessionId, customWebhook = null) => {
 
     sock.ev.process(async (events) => {
         // 1. Connection Lifecycle
-        if (events['connection.update']) {
-            const { connection, lastDisconnect, qr } = events['connection.update'];
+      if (events['connection.update']) {
+    const { connection, lastDisconnect, qr } = events['connection.update'];
+    
+    if (qr) {
+        await Session.findOneAndUpdate(
+            { sessionId }, 
+            { $set: { status: 'QR_READY', qrCode: qr } } // 👈 ADDED $set
+        );
+        await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
+    }
+
+    if (connection === 'close') {
+        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        const isLoggedOut = statusCode === DisconnectReason.loggedOut;
+
+        if (isLoggedOut) {
+            console.log(`❌ [${sessionId}] Session explicitly logged out by user.`);
             
-            if (qr) {
-                await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
-                await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
-            }
-
-            if (connection === 'close') {
-                // Safely extract the status code using Boom
-                const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-                
-                // ONLY wipe the session if explicitly logged out from the device
-                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-
-                if (isLoggedOut) {
-                    console.log(`❌ [${sessionId}] Session explicitly logged out by user.`);
-                    
-                    // Wipe Database
-                    await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
-                    await AuthState.deleteMany({ sessionId });
-                    sessions.delete(sessionId);
-                    
-                    // Notify Webhook: Device unlinked
-                    await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
-                } else {
-                    // Network drop, server restart, or temporary bad session. DO NOT wipe data.
-                    console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting...`);
-                    
-                    await Session.findOneAndUpdate({ sessionId }, { status: 'RECONNECTING' });
-                    
-                    // Notify Webhook: Attempting to reconnect
-                    await sendWebhook(sessionId, 'connection-state', { status: 'RECONNECTING', code: statusCode });
-                    
-                    // Exponential backoff or standard delay to prevent spamming WhatsApp servers
-                    setTimeout(() => createSession(sessionId), 5000);
-                }
-            } else if (connection === 'open') {
-                console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
-                await Session.findOneAndUpdate({ sessionId }, { status: 'CONNECTED', qrCode: null, waNumber: sock.user.id });
-                
-                // Notify Webhook: Successfully connected/reconnected
-                await sendWebhook(sessionId, 'connection-state', { status: 'CONNECTED', waNumber: sock.user.id });
-            }
+            await Session.findOneAndUpdate(
+                { sessionId }, 
+                { $set: { status: 'DISCONNECTED', qrCode: null } } // 👈 ADDED $set
+            );
+            await AuthState.deleteMany({ sessionId });
+            sessions.delete(sessionId);
+            
+            await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
+        } else {
+            console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting...`);
+            
+            await Session.findOneAndUpdate(
+                { sessionId }, 
+                { $set: { status: 'RECONNECTING' } } // 👈 ADDED $set
+            );
+            
+            await sendWebhook(sessionId, 'connection-state', { status: 'RECONNECTING', code: statusCode });
+            setTimeout(() => createSession(sessionId), 5000);
         }
+    } else if (connection === 'open') {
+        console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
+        await Session.findOneAndUpdate(
+            { sessionId }, 
+            { $set: { status: 'CONNECTED', qrCode: null, waNumber: sock.user.id } } // 👈 ADDED $set
+        );
+        
+        await sendWebhook(sessionId, 'connection-state', { status: 'CONNECTED', waNumber: sock.user.id });
+    }
+}
 
         // 2. Save Credentials to MongoDB
         if (events['creds.update']) {

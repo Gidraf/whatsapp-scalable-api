@@ -10,7 +10,13 @@ router.post('/:secret/generate-token', async (req, res) => {
     if (secret !== process.env.WA_SECRET) return res.status(401).json({ status: 'error', message: 'Invalid WA_SECRET' });
 
     const token = crypto.randomBytes(32).toString('hex');
-    await Session.findOneAndUpdate({ sessionId: session }, { sessionId: session, token: token }, { upsert: true, returnDocument: 'after' });
+    
+    // 👈 ADDED $set here
+    await Session.findOneAndUpdate(
+        { sessionId: session }, 
+        { $set: { sessionId: session, token: token } }, 
+        { upsert: true, returnDocument: 'after' }
+    );
     res.json({ status: 'success', token, full: `${session}-wabot`, message: 'Token generated' });
 });
 
@@ -22,12 +28,20 @@ router.post('/start-session', async (req, res) => {
     const { session } = req.params;
     const { webhook } = req.body;
     let sock = getSession(session);
-    if (!sock) await createSession(session, webhook);
-    else if (webhook) await Session.findOneAndUpdate({ sessionId: session }, { webhook });
+    
+    if (!sock) {
+        await createSession(session, webhook);
+    } else if (webhook) {
+        // 👈 ADDED $set here
+        await Session.findOneAndUpdate(
+            { sessionId: session }, 
+            { $set: { webhook } } 
+        );
+    }
 
     setTimeout(async () => {
         const state = await Session.findOne({ sessionId: session });
-        res.json({ status: 'success', state: state.status, qrcode: state.qrCode });
+        res.json({ status: 'success', state: state?.status, qrcode: state?.qrCode });
     }, 2000);
 });
 
