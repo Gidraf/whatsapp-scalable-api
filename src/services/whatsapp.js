@@ -1,4 +1,5 @@
 const { default: makeWASocket, DisconnectReason, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
+const { Boom } = require('@hapi/boom'); // Added for accurate error parsing
 const useMongoAuthState = require('../auth/mongoAuthState');
 const { Session, AuthState } = require('../models');
 const sendWebhook = require('./webhook');
@@ -32,37 +33,46 @@ const createSession = async (sessionId, customWebhook = null) => {
         if (events['connection.update']) {
             const { connection, lastDisconnect, qr } = events['connection.update'];
             
-            // Pass the raw QR string directly to Flask (No Base64 image generation)
             if (qr) {
                 await Session.findOneAndUpdate({ sessionId }, { status: 'QR_READY', qrCode: qr });
                 await sendWebhook(sessionId, 'qrcode', { qrcode: qr });
             }
 
             if (connection === 'close') {
-                const statusCode = lastDisconnect?.error?.output?.statusCode;
+                // Safely extract the status code using Boom
+                const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
                 
-                // 401: Logged out from phone | 500: Session keys are corrupted
-                const isLoggedOut = statusCode === DisconnectReason.loggedOut || statusCode === DisconnectReason.badSession;
+                // ONLY wipe the session if explicitly logged out from the device
+                const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
                 if (isLoggedOut) {
-                    console.log(`❌ [${sessionId}] Session explicitly logged out or corrupted.`);
+                    console.log(`❌ [${sessionId}] Session explicitly logged out by user.`);
                     
-                    // Update Database
+                    // Wipe Database
                     await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
                     await AuthState.deleteMany({ sessionId });
                     sessions.delete(sessionId);
                     
-                    // Notify Flask to update its DB and alert the frontend
-                    await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
+                    // Notify Webhook: Device unlinked
+                    await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
                 } else {
-                    // It's just a network drop or Baileys internal restart. DO NOT wipe data.
-                    console.log(`🔄 [${sessionId}] Network drop (Code: ${statusCode}). Reconnecting silently...`);
-                    setTimeout(() => createSession(sessionId), 3000);
+                    // Network drop, server restart, or temporary bad session. DO NOT wipe data.
+                    console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting...`);
+                    
+                    await Session.findOneAndUpdate({ sessionId }, { status: 'RECONNECTING' });
+                    
+                    // Notify Webhook: Attempting to reconnect
+                    await sendWebhook(sessionId, 'connection-state', { status: 'RECONNECTING', code: statusCode });
+                    
+                    // Exponential backoff or standard delay to prevent spamming WhatsApp servers
+                    setTimeout(() => createSession(sessionId), 5000);
                 }
             } else if (connection === 'open') {
                 console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
-                await Session.findOneAndUpdate({ sessionId, status: 'CONNECTED', qrCode: null, waNumber: sock.user.id });
-                await sendWebhook(sessionId, 'status-find', { status: 'qrReadSuccess' });
+                await Session.findOneAndUpdate({ sessionId }, { status: 'CONNECTED', qrCode: null, waNumber: sock.user.id });
+                
+                // Notify Webhook: Successfully connected/reconnected
+                await sendWebhook(sessionId, 'connection-state', { status: 'CONNECTED', waNumber: sock.user.id });
             }
         }
 
@@ -72,7 +82,6 @@ const createSession = async (sessionId, customWebhook = null) => {
         }
 
         // 3. Stream Messages to Webhook (Stateless)
-       // 3. Stream Messages to Webhook (Stateless)
         if (events['messages.upsert']) {
             const m = events['messages.upsert'];
             if (m.type === 'notify') {
@@ -83,7 +92,6 @@ const createSession = async (sessionId, customWebhook = null) => {
                     let mediaBase64 = null;
                     let mimetype = null;
 
-                    // Decrypt and download media if the message contains a file/image
                     const mediaTypes = ['imageMessage', 'documentMessage', 'videoMessage', 'audioMessage'];
                     if (mediaTypes.includes(messageType)) {
                         try {
@@ -100,14 +108,13 @@ const createSession = async (sessionId, customWebhook = null) => {
                         }
                     }
 
-                    // Send payload to Flask
                     await sendWebhook(sessionId, 'onmessage', {
                         from: msg.key.remoteJid,
                         pushName: msg.pushName,
                         type: messageType,
                         messageId: msg.key.id,
                         message: msg.message,
-                        mediaBase64: mediaBase64, // Python will receive this!
+                        mediaBase64: mediaBase64,
                         mimetype: mimetype
                     });
                 }
@@ -150,20 +157,21 @@ const deleteSession = async (sessionId) => {
     await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
     await AuthState.deleteMany({ sessionId });
     
-    // Notify Flask
-    await sendWebhook(sessionId, 'status-find', { status: 'logoutsession' });
+    // Notify Webhook
+    await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'manual_logout' });
 };
 
 // Auto-Restore Function
 const restoreSessions = async () => {
     try {
-        const activeSessions = await Session.find({ status: 'CONNECTED' });
+        // Find both connected and previously reconnecting sessions to revive them
+        const activeSessions = await Session.find({ status: { $in: ['CONNECTED', 'RECONNECTING'] } });
         console.log(`🔄 Found ${activeSessions.length} active sessions in DB. Booting them up...`);
         
         for (const sessionDb of activeSessions) {
             console.log(`🔌 Restoring session: [${sessionDb.sessionId}]`);
             await createSession(sessionDb.sessionId, sessionDb.webhook);
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Prevent rate-limiting
+            await new Promise(resolve => setTimeout(resolve, 2000)); // 2s buffer to prevent rate-limiting
         }
     } catch (error) {
         console.error("❌ Failed to restore sessions:", error.message);
