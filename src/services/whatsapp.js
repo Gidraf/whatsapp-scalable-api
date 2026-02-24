@@ -37,8 +37,8 @@ const createSession = async (sessionId, customWebhook = null) => {
     sessions.set(sessionId, sock);
 
     sock.ev.process(async (events) => {
+
         // 1. Connection Lifecycle
-// 1. Connection Lifecycle
         if (events['connection.update']) {
             const { connection, lastDisconnect, qr } = events['connection.update'];
             
@@ -54,8 +54,13 @@ const createSession = async (sessionId, customWebhook = null) => {
                 const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-                if (isLoggedOut) {
-                    console.log(`❌ [${sessionId}] Session explicitly logged out by user.`);
+                // 👈 NEW: Check if the API already marked this session as dead
+                const sessionInDb = await Session.findOne({ sessionId });
+                const isManuallyDisconnected = sessionInDb?.status === 'DISCONNECTED';
+
+                // Abort reconnect if logged out from phone OR logged out via API
+                if (isLoggedOut || isManuallyDisconnected) {
+                    console.log(`❌ [${sessionId}] Session explicitly logged out or deleted.`);
                     
                     await Session.findOneAndUpdate(
                         { sessionId }, 
@@ -64,9 +69,12 @@ const createSession = async (sessionId, customWebhook = null) => {
                     await AuthState.deleteMany({ sessionId });
                     sessions.delete(sessionId);
                     
-                    await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
+                    // Only send webhook if logged out from the phone 
+                    // (The API logout already sends its own webhook in deleteSession)
+                    if (isLoggedOut) {
+                        await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
+                    }
                 } else {
-                    // Silently handle Code 405 or other temporary disconnects
                     console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting silently...`);
                     
                     await Session.findOneAndUpdate(
@@ -74,12 +82,7 @@ const createSession = async (sessionId, customWebhook = null) => {
                         { $set: { status: 'RECONNECTING' } }
                     );
                     
-                    // Do NOT trigger sendWebhook here to avoid spamming the Python server.
-                    
-                    // Fetch the existing webhook URL from the DB so we don't lose it during the retry
-                    const existingSession = await Session.findOne({ sessionId });
-                    
-                    setTimeout(() => createSession(sessionId, existingSession?.webhook), 5000);
+                    setTimeout(() => createSession(sessionId, sessionInDb?.webhook), 5000);
                 }
             } else if (connection === 'open') {
                 console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
