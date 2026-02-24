@@ -1,30 +1,24 @@
 const { default: makeWASocket, DisconnectReason, Browsers, downloadMediaMessage } = require('@whiskeysockets/baileys');
-const { Boom } = require('@hapi/boom'); // Added for accurate error parsing
+const { Boom } = require('@hapi/boom');
 const useMongoAuthState = require('../auth/mongoAuthState');
 const { Session, AuthState } = require('../models');
 const sendWebhook = require('./webhook');
 const pino = require('pino');
 
 const sessions = new Map();
+const retryCounts = new Map(); // 👈 Tracks retry attempts per session
 
 const createSession = async (sessionId, customWebhook = null) => {
     const { state, saveCreds } = await useMongoAuthState(sessionId);
     
+    // Safely save the webhook without overwriting the whole document
     if (customWebhook) {
         await Session.findOneAndUpdate(
             { sessionId }, 
-            { webhook: customWebhook }, 
+            { $set: { webhook: customWebhook } }, 
             { upsert: true, returnDocument: 'after' }
         );
     }
-
-    if (customWebhook) {
-    await Session.findOneAndUpdate(
-        { sessionId }, 
-        { $set: { webhook: customWebhook } }, // 👈 ADDED $set
-        { upsert: true, returnDocument: 'after' }
-    );
-}
 
     const sock = makeWASocket({
         auth: state,
@@ -54,13 +48,14 @@ const createSession = async (sessionId, customWebhook = null) => {
                 const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-                // 👈 NEW: Check if the API already marked this session as dead
+                // Check if the API already marked this session as dead
                 const sessionInDb = await Session.findOne({ sessionId });
                 const isManuallyDisconnected = sessionInDb?.status === 'DISCONNECTED';
 
                 // Abort reconnect if logged out from phone OR logged out via API
                 if (isLoggedOut || isManuallyDisconnected) {
                     console.log(`❌ [${sessionId}] Session explicitly logged out or deleted.`);
+                    retryCounts.delete(sessionId); // Clean up tracker
                     
                     await Session.findOneAndUpdate(
                         { sessionId }, 
@@ -75,17 +70,46 @@ const createSession = async (sessionId, customWebhook = null) => {
                         await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'logged_out' });
                     }
                 } else {
-                    console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting silently...`);
-                    
-                    await Session.findOneAndUpdate(
-                        { sessionId }, 
-                        { $set: { status: 'RECONNECTING' } }
-                    );
-                    
-                    setTimeout(() => createSession(sessionId, sessionInDb?.webhook), 5000);
+                    // ---------------------------------------------------------
+                    // RETRY LOGIC (30 Max, 1-Minute Delay)
+                    // ---------------------------------------------------------
+                    let currentRetries = retryCounts.get(sessionId) || 0;
+
+                    if (currentRetries >= 30) {
+                        console.log(`🚨 [${sessionId}] Max retries (30) reached. Deleting session permanently.`);
+                        retryCounts.delete(sessionId);
+                        
+                        // Wipe the database
+                        await Session.findOneAndUpdate(
+                            { sessionId }, 
+                            { $set: { status: 'DISCONNECTED', qrCode: null } }
+                        );
+                        await AuthState.deleteMany({ sessionId });
+                        sessions.delete(sessionId);
+                        
+                        // Notify Flask to delete the integration
+                        await sendWebhook(sessionId, 'connection-state', { status: 'DISCONNECTED', reason: 'max_retries_exceeded' });
+                    } else {
+                        currentRetries += 1;
+                        retryCounts.set(sessionId, currentRetries);
+                        
+                        console.log(`🔄 [${sessionId}] Connection dropped (Code: ${statusCode}). Reconnecting attempt ${currentRetries}/30 in 1 minute...`);
+                        
+                        await Session.findOneAndUpdate(
+                            { sessionId }, 
+                            { $set: { status: 'RECONNECTING' } }
+                        );
+                        
+                        await sendWebhook(sessionId, 'connection-state', { status: 'RECONNECTING', code: statusCode, attempt: currentRetries });
+                        
+                        // 60000 ms = 1 minute delay
+                        setTimeout(() => createSession(sessionId, sessionInDb?.webhook), 60000);
+                    }
                 }
             } else if (connection === 'open') {
                 console.log(`✅ [${sessionId}] WhatsApp Connected successfully!`);
+                retryCounts.delete(sessionId); // 👈 Reset the tracker on success
+                
                 await Session.findOneAndUpdate(
                     { sessionId }, 
                     { $set: { status: 'CONNECTED', qrCode: null, waNumber: sock.user.id } }
@@ -171,9 +195,13 @@ const deleteSession = async (sessionId) => {
         try { await sock.logout(); } catch (e) {}
         sessions.delete(sessionId);
     }
+    retryCounts.delete(sessionId);
     
-    // Wipe DB
-    await Session.findOneAndUpdate({ sessionId }, { status: 'DISCONNECTED', qrCode: null });
+    // Wipe DB properly using $set
+    await Session.findOneAndUpdate(
+        { sessionId }, 
+        { $set: { status: 'DISCONNECTED', qrCode: null } }
+    );
     await AuthState.deleteMany({ sessionId });
     
     // Notify Webhook
