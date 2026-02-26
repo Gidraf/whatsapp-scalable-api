@@ -10,42 +10,34 @@ const retryCounts = new Map(); // 👈 Tracks retry attempts per session
 const pendingSessions = new Set(); // 👈 NEW: Synchronous Lock
 
 const createSession = async (sessionId, customWebhook = null) => {
-    // 1. SYNCHRONOUS LOCK: Instantly block duplicate React requests
-    if (sessions.has(sessionId) || pendingSessions.has(sessionId)) {
+    // 👇 1. THE LOCK: Prevent React from spinning up duplicate fighting sockets
+    if (sessions.has(sessionId)) {
         console.log(`⚠️ [${sessionId}] is already booting. Ignoring duplicate request.`);
-        return sessions.get(sessionId) || null;
+        return sessions.get(sessionId);
     }
 
-    // Lock it down before we make ANY database calls
-    pendingSessions.add(sessionId);
+    const { state, saveCreds } = await useMongoAuthState(sessionId);
+    
+    if (customWebhook) {
+        await Session.findOneAndUpdate(
+            { sessionId }, 
+            { webhook: customWebhook }, 
+            { upsert: true, returnDocument: 'after' }
+        );
+    }
 
-    try {
-        const { state, saveCreds } = await useMongoAuthState(sessionId);
+    const sock = makeWASocket({
+        auth: state,
+        logger: pino({ level: 'silent' }),
         
-        if (customWebhook) {
-            await Session.findOneAndUpdate(
-                { sessionId }, 
-                { webhook: customWebhook }, 
-                { upsert: true, returnDocument: 'after' }
-            );
-        }
+        // 👇 2. THE SIGNATURE: Bypass WhatsApp's strict 405 anti-bot filters
+        browser: ['AjiriwaBot', 'Chrome', '1.0.0'], 
+        
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: false
+    });
 
-        // 2. DYNAMIC VERSIONING: Fetch the absolute latest WA version to bypass 405 blocks
-        const { version, isLatest } = await fetchLatestBaileysVersion();
-        console.log(`📱 Using WhatsApp Web v${version.join('.')}, isLatest: ${isLatest}`);
-
-        const sock = makeWASocket({
-            version, // 👈 Tell WhatsApp we are using the newest client
-            auth: state,
-            logger: pino({ level: 'silent' }),
-            browser: Browsers.macOS('Desktop'), // Default is safest
-            generateHighQualityLinkPreview: true,
-            syncFullHistory: false
-        });
-
-        // Save the socket and remove the pending lock
-        sessions.set(sessionId, sock);
-        pendingSessions.delete(sessionId);
+    sessions.set(sessionId, sock);
 
     sock.ev.process(async (events) => {
 
