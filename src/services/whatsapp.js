@@ -46,6 +46,7 @@ const createSession = async (sessionId, customWebhook = null) => {
 
             if (connection === 'close') {
                 const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+                console.log(`⚠️ Connection closed. Status code: ${statusCode}. Details:`, lastDisconnect?.error?.message);
                 const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
                 // Check if the API already marked this session as dead
