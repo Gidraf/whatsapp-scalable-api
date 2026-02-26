@@ -9,13 +9,18 @@ const sessions = new Map();
 const retryCounts = new Map(); // 👈 Tracks retry attempts per session
 
 const createSession = async (sessionId, customWebhook = null) => {
+    // 👇 1. THE LOCK: Prevent React from spinning up duplicate fighting sockets
+    if (sessions.has(sessionId)) {
+        console.log(`⚠️ [${sessionId}] is already booting. Ignoring duplicate request.`);
+        return sessions.get(sessionId);
+    }
+
     const { state, saveCreds } = await useMongoAuthState(sessionId);
     
-    // Safely save the webhook without overwriting the whole document
     if (customWebhook) {
         await Session.findOneAndUpdate(
             { sessionId }, 
-            { $set: { webhook: customWebhook } }, 
+            { webhook: customWebhook }, 
             { upsert: true, returnDocument: 'after' }
         );
     }
@@ -23,9 +28,12 @@ const createSession = async (sessionId, customWebhook = null) => {
     const sock = makeWASocket({
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
+        
+        // 👇 2. THE SIGNATURE: Bypass WhatsApp's strict 405 anti-bot filters
+        browser: ['AjiriwaBot', 'Chrome', '1.0.0'], 
+        
         generateHighQualityLinkPreview: true,
-        syncFullHistory: false // Prevents massive data downloads on connect
+        syncFullHistory: false
     });
 
     sessions.set(sessionId, sock);
